@@ -8,7 +8,7 @@ from hitcpy import HITC
 
 from influxclient import SensorClient
 
-sensorClient = SensorClient("smartthings_htm_bridge", verbose=True)
+sensorClient = SensorClient("smartthings_htm_bridge")
 DEFAULT_PORT = 8080
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
 # 2015-12-08 23:12:47.105
@@ -27,7 +27,7 @@ def getHitcUrl():
   return url
 
 
-def runOneDataPoint(hitcClient, modelId, inputTime, value):
+def runOneDataPoint(hitcClient, modelId, inputTime, value, verbose=False):
   if isinstance(inputTime, basestring):
     timestamp = int(time.mktime(datetime.strptime(inputTime, DATE_FORMAT).timetuple()))
   else:
@@ -36,6 +36,8 @@ def runOneDataPoint(hitcClient, modelId, inputTime, value):
     "c0": timestamp,
     "c1": value
   }
+  if verbose:
+    print "Model {}, running row {}".format(modelId, dataRow)
   # There is only one value in the result list, so pop() it off.
   return hitcClient.get_model(modelId).run(dataRow).pop()
 

@@ -26,36 +26,60 @@ Run:
 
 You can use this to interact with HITC. I use it to manage models and view sensor data. Here's what it can do.
 
+### Info
+
+Shows connection details for InfluxDB and HITC.
+
+    ./cli.py info
+
 ### Models
 
 #### Create a model
 
+Creates a new model in HITC, optionally priming it with sensor data.
+
     ./cli.py models:create \
         --guid=<guid> \
-        --paramPath=<path-to-params-json>
+        --paramPath=<path-to-params-json> \
+        --measurement=<measurement> \
+        --component=<component> \ 
+        --limit=<limit>
+
+If you provide both a measurement and a component, it is assumed that you want to load data from that sensor into the newly created model. In this case, a guid is not necessary, but a limit should be provided.
 
 #### List models
+
+List all the existing models in HITC.
 
     ./cli.py models:list
 
 #### Delete a model
+
+Deletes one model by id in HITC.
 
     ./cli.py models:delete \
         --guid=<guid>
 
 #### Delete all models
 
+Deletes all models! No take-backs!
+
     ./cli.py models:deleteAll
 
 #### Run data through a model
+
+Extracts sensor data for a given measurement / component and runs it through the specified model.
 
     ./cli.py models:loadData \
         --component=<component> \
         --measurement=<measurement> \
         --limit=<limit> \
+        --aggregate=<aggregation-period> \
         --guid=<guid>
 
-## Sensor Data
+The `--aggreation` value can be something like `2w` (2 weeks), `1h` (one hour), or `15m` (15 minutes).
+
+### Sensors
 
 #### List available sensors
 
@@ -84,3 +108,4 @@ You can use this to interact with HITC. I use it to manage models and view senso
         --measurement=<measurement> \
         --component=<component> \
         --limit=<limit>
+

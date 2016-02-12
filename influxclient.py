@@ -21,13 +21,11 @@ def zipSensorAndInferenceData(sensorData, inferenceData):
 
   # If inferenceData is empty, just return sensorData
   if isinstance(inferenceData, list):
-    # Just return the sensor data and warn.
-    print "WARNING: No HTM inference data available. Only returning sensor data."
+    # Just return the sensor data if there's no inference data.
     return sensorData
 
   sensorSeries = sensorData["series"][0]
   inferenceSeries = inferenceData["series"][0]
-
   sensorValues = sensorSeries["values"]
   sensorColumns = sensorSeries["columns"]
   inferenceValues = inferenceSeries["values"]
@@ -54,25 +52,18 @@ def zipSensorAndInferenceData(sensorData, inferenceData):
     valuesOut.append(valueOut)
     sensorStep += 1
 
+  seriesOut = {
+    "values": valuesOut,
+    "name": sensorSeries["name"],
+    "columns": columnsOut
+  }
+  if "tags" in sensorSeries:
+    seriesOut["tags"] = sensorSeries["tags"]
   dataOut = {
-    "series": [{
-      "values": valuesOut,
-      "name": sensorSeries["name"],
-      "columns": columnsOut,
-      "tags": sensorSeries["tags"]
-    }]
+    "series": [seriesOut]
   }
 
   return dataOut
-
-
-def influxCopyPossible(fromMeta, toMeta):
-  # Name and tags must be the same.
-  if fromMeta["name"] != toMeta["name"] \
-      or fromMeta["tags"] != toMeta["tags"]:
-    return False
-  # Ensure all columns exist in the destination schema.
-  return all(x in toMeta["columns"] for x in fromMeta["columns"])
 
 
 class SensorClient(object):
@@ -88,10 +79,6 @@ class SensorClient(object):
                ):
     self._database = database
     self._verbose = verbose
-    if self._verbose:
-      print("Connecting to {0}:{1}@{2}:{3} (SSL? {4})".format(
-        username, "***********", host, port, ssl
-      ))
 
     self._client = InfluxDBClient(
       host=host,
@@ -100,6 +87,9 @@ class SensorClient(object):
       password=password,
       ssl=ssl
     )
+
+    if self._verbose:
+      print("Connected to {}".format(self))
 
     # TODO: having IO in the constructor is a bad idea, but this is a prototype.
     databases = self._client.get_list_database()
@@ -112,6 +102,14 @@ class SensorClient(object):
     self._client.switch_database(database)
 
 
+  def __str__(self):
+    return "{0}:{1}@{2}:{3} over {4}".format(
+      self._client._username,
+      "***********",
+      self._client._host,
+      self._client._port,
+      self._client._scheme
+    )
 
 
   def saveHtmInference(self,
@@ -174,9 +172,15 @@ class SensorClient(object):
 
 
   def listSensors(self):
-    allSensors = self._client.get_list_series()
-    sensorsOnly = (s for s in allSensors if not s["name"].endswith("_inference"))
-    return sensorsOnly
+    rawSensors = self._client.get_list_series()
+    allSensors = []
+    for sensor in rawSensors:
+      for tag in sensor["tags"]:
+        allSensors.append({
+          "name": sensor["name"],
+          "tags": [tag]
+        })
+    return allSensors
 
 
   def queryMeasurement(self,
@@ -185,33 +189,32 @@ class SensorClient(object):
                        limit=None,
                        since=None,
                        aggregate=None,
-                       database=None):
-    toSelect = "value"
-
+                       database=None,
+                       verbose=None):
+    toSelect = "*"
     if aggregate is not None:
       toSelect = "MEAN(value)"
-
     query = "SELECT {0} FROM {1} WHERE component = '{2}'".format(toSelect, measurement, component)
-
     if since is not None:
-      query += " AND time > {0}s".format(since)
-
+      query += " AND time > '{0}'".format(since)
     if aggregate is None:
       query += " GROUP BY *"
     else:
       query += " GROUP BY time({0})".format(aggregate)
-
     query += " ORDER BY time DESC"
-
     if limit is not None:
       query += " LIMIT {0}".format(limit)
 
-    print query
+    if verbose:
+      print "Calling on database {}".format(database)
+      print query
 
     response = self._client.query(query, database=database)
 
     # Don't process empty responses
     if len(response) < 1:
+      if verbose:
+        print "Empty Reponse!"
       return []
 
     data = response.raw
@@ -222,9 +225,9 @@ class SensorClient(object):
     return data
 
 
-  def getSensorData(self, measurement, component, limit=None, since=None, aggregate=None):
-    sensorData = self.queryMeasurement(measurement, component, limit=limit, since=since, aggregate=aggregate)
-    inferenceData = self.queryMeasurement(measurement + "_inference", component, limit=limit, since=since)
+  def getSensorData(self, measurement, component, **kwargs):
+    sensorData = self.queryMeasurement(measurement, component, **kwargs)
+    inferenceData = self.queryMeasurement(measurement + "_inference", component, **kwargs)
     return zipSensorAndInferenceData(sensorData, inferenceData)
 
 
@@ -234,22 +237,9 @@ class SensorClient(object):
     component = kwargs["component"]
     measurement = kwargs["measurement"]
     limit = kwargs["limit"]
-    rawData = self.queryMeasurement(
-      measurement, component, limit=1, database=toDb
-    )
-    if isinstance(rawData, list):
-      raise Exception("Cannot transfer data because destination DB schema does not match source DB schema!")
-    toSignature = rawData["series"][0]
     fromData = self.queryMeasurement(
-      measurement, component, limit=limit, database=fromDb
+      measurement, component, limit=limit, database=fromDb, verbose=kwargs["verbose"]
     )["series"][0]
-
-    if not influxCopyPossible(fromData, toSignature):
-      if kwargs["verbose"]:
-        from pprint import pprint
-        pprint(fromData)
-        pprint(toSignature)
-      raise Exception("Cannot transfer data because destination DB schema does not match source DB schema!")
 
     payload = []
 
@@ -263,7 +253,10 @@ class SensorClient(object):
         }
       })
 
-    self._client.write_points(payload)
+    self._client.write_points(payload, database=toDb)
 
+
+  def deleteInferences(self, measurement, component):
+    self._client.delete_series(measurement=measurement, tags={"component":component})
 
 

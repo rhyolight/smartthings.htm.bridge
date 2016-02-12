@@ -64,6 +64,11 @@ def createOptionsParser():
     dest="limit",
     help="Sensor data limit when fetching.")
   parser.add_option(
+    "-s",
+    "--since",
+    dest="since",
+    help="Provides a lower bound for time-based queries. Should be a time string.")
+  parser.add_option(
     "-f",
     "--from",
     dest="from",
@@ -73,10 +78,16 @@ def createOptionsParser():
     "--to",
     dest="to",
     help="InfluxDB database name.")
+  parser.add_option(
+    "-a",
+    "--aggregate",
+    dest="aggregate",
+    help="Time period to aggregate a MEAN over the data.")
 
   return parser
 
 
+# Subjects / Actions
 
 class models:
 
@@ -97,26 +108,34 @@ class models:
 
 
   def create(self, **kwargs):
-    if kwargs["paramPath"] is None:
-      raise ValueError("User must provide --param-path to model params JSON file.")
+    validateOptions(["paramPath"], kwargs)
     paramPath = kwargs["paramPath"]
     with(open(paramPath, "r")) as paramFile:
       params = json.loads(paramFile.read())
       if "guid" in kwargs and kwargs["guid"] is not None:
         params["guid"] = kwargs["guid"]
+      elif kwargs["measurement"] is not None and kwargs["component"] is not None:
+        params["guid"] = kwargs["component"] + "_" + kwargs["measurement"]
+        kwargs["guid"] = params["guid"]
       try:
         model = self._hitcClient.create_model(params)
-        print "Created model '%s'" % model.guid
-      except KeyError:
-        print "Model with id '%s' already exists." % kwargs["guid"]
+      except KeyError as e:
+        print "Model with id '%s' already exists." % params["guid"]
+      print "Created model '%s'" % model.guid
+      if kwargs["measurement"] is not None and kwargs["component"] is not None:
+        self.loadData(**kwargs)
 
 
   def delete(self, **kwargs):
+    validateOptions(["guid"], kwargs)
     guid = kwargs["guid"]
     for model in self._hitcClient.get_all_models():
       if model.guid == guid:
         model.delete()
-        print "Deleted model '%s'" % guid
+        print "Deleted model '%s' from HITC" % guid
+    component, measurement = guid.split('_')
+    self._sensorClient.deleteInferences(measurement + "_inference", component)
+    print "Deleted all inferences for {}_{}".format(component, measurement);
 
   def deleteAll(self, **kwargs):
     for model in self._hitcClient.get_all_models():
@@ -125,18 +144,36 @@ class models:
 
 
   def loadData(self, **kwargs):
+    validateOptions(["component", "measurement", "guid"], kwargs)
     data = self._sensorClient.getSensorData(
-      kwargs["measurement"], kwargs["component"],
-      limit=kwargs["limit"], sensorOnly=True
+      kwargs["measurement"],
+      kwargs["component"],
+      limit=kwargs["limit"],
+      since=kwargs["since"],
+      aggregate=kwargs["aggregate"],
+      verbose=kwargs["verbose"]
     )["series"][0]
     guid = kwargs["guid"]
     results = []
     for point in data["values"]:
-      results.append(runOneDataPoint(
-        self._hitcClient, guid, iso8601.parse_date(point[0]), point[1]
-      ))
+      pointTime = point[0]
+      pointValue = point[1]
+      if pointValue is not None:
+        result = runOneDataPoint(
+          self._hitcClient,
+          guid,
+          iso8601.parse_date(pointTime),
+          pointValue,
+          verbose=kwargs["verbose"]
+        )
+        timezone = "unknown"
+        if "timezone" in data:
+          timezone = data["timezone"]
+        self._sensorClient.saveHtmInference(
+          result, kwargs["component"], kwargs["measurement"], pointTime, timezone
+        )
+        results.append(result)
     print "Loaded %i data points into model '%s'." % (len(results), guid)
-
 
 
 
@@ -149,6 +186,7 @@ class sensors:
 
 
   def data(self, **kwargs):
+    validateOptions(["component", "measurement"], kwargs)
     data = self._sensorClient.queryMeasurement(
       kwargs["measurement"], kwargs["component"],
       limit=kwargs["limit"]
@@ -161,9 +199,10 @@ class sensors:
 
 
   def inference(self, **kwargs):
+    validateOptions(["component", "measurement"], kwargs)
     data = self._sensorClient.queryMeasurement(
       kwargs["measurement"] + "_inference", kwargs["component"],
-      limit=kwargs["limit"]
+      limit=kwargs["limit"], verbose=kwargs["verbose"]
     )["series"][0]
     values = data["values"]
     columns = data["columns"]
@@ -173,18 +212,40 @@ class sensors:
 
 
   def list(self, **kwargs):
+    print "{0:<28} {1:<30}".format("measurement", "component").upper()
+    print "{0:<28} {1:<30}".format("===========", "=========")
     for s in self._sensorClient.listSensors():
       name = s["name"]
-      if not name.endswith("_inference"):
-        print "component: %s\tmeasurement: %s" % (s["tags"][0]["component"], name)
+      print "{0:<28} {1:<30}".format(name, s["tags"][0]["component"])
+    print "{0:<28} {1:<30}".format("===========", "=========")
 
 
   def transfer(self, **kwargs):
+    validateOptions(["from", "to", "component", "measurement"], kwargs)
     self._sensorClient.transfer(**kwargs)
 
 
+
+# Helper functions
+
+def validateOptions(required, options):
+  for r in required:
+    if r not in options.keys() or options[r] is None:
+      raise Exception("The command executed requires the '{}' option.".format(r))
+
+
 def extractIntent(command):
-  return command.split(":")
+  if ":" in command:
+    return command.split(":")
+  else:
+    return command, None
+
+
+def displayInfo(hitcClient, sensorClient):
+  print "Using InfluxDb at {}".format(sensorClient)
+  print "\tdefault database is '{}'".format(sensorClient._database)
+  print "Using HITC at {}".format(hitcClient.url)
+
 
 
 def runAction(subject, action, **kwargs):
@@ -192,12 +253,16 @@ def runAction(subject, action, **kwargs):
   sensorClient = SensorClient(
     "smartthings_htm_bridge", verbose=kwargs["verbose"]
   )
-  subjectType = get_class(subject)(hitcClient, sensorClient)
-  actionFunction = getattr(subjectType, action)
-  print "\n* * *\n"
-  actionFunction(**kwargs)
+  if subject == "info":
+    displayInfo(hitcClient, sensorClient)
+  else:
+    subjectType = get_class(subject)(hitcClient, sensorClient)
+    actionFunction = getattr(subjectType, action)
+    print "\n* * *\n"
+    actionFunction(**kwargs)
 
 
+# Start here
 
 if __name__ == "__main__":
   parser = createOptionsParser()
